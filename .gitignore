@@ -1,0 +1,4 @@
+.DS_Store
+.venv/
+csv_mapper/customers*.csv
+csv_mapper/src/__pycache__/
