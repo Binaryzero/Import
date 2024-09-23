@@ -2,3 +2,5 @@
 .venv/
 csv_mapper/customers*.csv
 csv_mapper/src/__pycache__/
+csv_mapper/__pycache__/
+

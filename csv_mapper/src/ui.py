@@ -1,27 +1,59 @@
 import json
-
+import os
+import sys
 import pandas as pd
-from PyQt5.QtCore import Qt
+import re
 from PyQt5.QtWidgets import (
     QApplication,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
-    QPushButton,
-    QVBoxLayout,
     QWidget,
-    QComboBox,
-    QFormLayout,
-    QDialog,
-    QMessageBox,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QListWidget,
+    QFileDialog,
     QInputDialog,
+    QMessageBox,
+    QLineEdit,
+    QLabel,
+    QComboBox,
+    QTextEdit,
+    QDialog,
+    QDialogButtonBox,
 )
-
+from PyQt5.QtCore import Qt
 from .csv_parser import CSVParser
+
+
+class FreeformTextDialog(QDialog):
+    def __init__(self, parent=None, columns=None):
+        super().__init__(parent)
+        self.setWindowTitle("Freeform Text Editor")
+        self.columns = columns or []
+        
+        layout = QVBoxLayout(self)
+        
+        self.text_edit = QTextEdit()
+        layout.addWidget(self.text_edit)
+        
+        column_layout = QHBoxLayout()
+        for column in self.columns:
+            btn = QPushButton(column)
+            btn.clicked.connect(lambda _, col=column: self.insert_column(col))
+            column_layout.addWidget(btn)
+        
+        layout.addLayout(column_layout)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def insert_column(self, column):
+        self.text_edit.insertPlainText(f"{{{column}}}")
+
+    def get_text(self):
+        return self.text_edit.toPlainText()
 
 
 class Transformation:
@@ -441,28 +473,55 @@ class MappingUI(QMainWindow):
         self.update_target_list()
 
     def add_operation(self, transformation, operation_list):
-        operation_types = ["Custom", "Rename", "Combine", "Split", "Filter"]
+        operation_types = ["Custom", "Rename", "Combine", "Split", "Filter", "Freeform Text"]
         operation_type, ok = QInputDialog.getItem(
             self, "Add Operation", "Select operation type:", operation_types, 0, False
         )
 
         if ok:
-            if operation_type == "Custom":
-                custom_code, ok = QInputDialog.getText(
+            if operation_type == "Freeform Text":
+                dialog = FreeformTextDialog(self, columns=list(self.csv_data.columns))
+                if dialog.exec_():
+                    template = dialog.get_text()
+                    new_column_name, ok = QInputDialog.getText(
+                        self, "New Column", "Enter name for the new column:"
+                    )
+                    if ok:
+                        # Extract placeholders and their corresponding column names
+                        placeholders = re.findall(r'\{([^}]+)\}', template)
+                        
+                        # Create the operation code
+                        operation_code = f"template = '''{template}'''\n"
+                        operation_code += f"df['{new_column_name}'] = df.apply(lambda row: template.format("
+                        
+                        # Generate the format arguments
+                        format_args = []
+                        for placeholder in placeholders:
+                            # Use dictionary-style string formatting for column names with spaces
+                            format_args.append(f"**{{'{placeholder}': row['{placeholder}']}}")
+                        
+                        operation_code += ", ".join(format_args)
+                        operation_code += "), axis=1)\n"
+                        
+                        transformation.add_operation(operation_code)
+                        operation_list.addItem(f"Freeform Text: {new_column_name}")
+            elif operation_type == "Custom":
+                custom_code, ok = QInputDialog.getMultiLineText(
                     self, "Custom", "Enter custom transformation code:"
                 )
                 if ok:
                     transformation.add_operation(custom_code)
-                    operation_list.addItem(f"Custom: {custom_code}")
+                    operation_list.addItem(f"Custom: {custom_code.split('\n')[0]}...")
             elif operation_type == "Rename":
                 old_name = self.get_column_selection("Select column to rename")
                 new_name, ok = QInputDialog.getText(
                     self, "Rename", "Enter new column name:"
                 )
                 if ok:
-                    transformation.add_operation(
+                    operation_code = (
                         f"df = df.rename(columns={{'{old_name}': '{new_name}'}})"
                     )
+                    transformation.add_operation(operation_code)
                     operation_list.addItem(f"Rename: {old_name} -> {new_name}")
             elif operation_type == "Combine":
                 col1 = self.get_column_selection("Select first column to combine")
@@ -471,17 +530,19 @@ class MappingUI(QMainWindow):
                     self, "Combine", "Enter new column name:"
                 )
                 if ok:
-                    transformation.add_operation(
+                    operation_code = (
                         f"df['{new_name}'] = df['{col1}'] + ' ' + df['{col2}']"
                     )
+                    transformation.add_operation(operation_code)
                     operation_list.addItem(f"Combine: {col1} + {col2} -> {new_name}")
             elif operation_type == "Split":
                 col = self.get_column_selection("Select column to split")
                 delimiter, ok = QInputDialog.getText(self, "Split", "Enter delimiter:")
                 if ok:
-                    transformation.add_operation(
+                    operation_code = (
                         f"df['{col}_split'] = df['{col}'].str.split('{delimiter}')"
                     )
+                    transformation.add_operation(operation_code)
                     operation_list.addItem(f"Split: {col} (delimiter: {delimiter})")
             elif operation_type == "Filter":
                 col = self.get_column_selection("Select column to filter")
@@ -489,9 +550,10 @@ class MappingUI(QMainWindow):
                     self, "Filter", f"Enter filter condition for {col} (e.g., > 5):"
                 )
                 if ok:
-                    transformation.add_operation(
+                    operation_code = (
                         f"df = df[df['{col}'].astype(str).eval('{condition}')]"
                     )
+                    transformation.add_operation(operation_code)
                     operation_list.addItem(f"Filter: {col} {condition}")
 
     def get_column_selection(self, prompt):
@@ -544,24 +606,19 @@ class MappingUI(QMainWindow):
             return
 
         try:
-            with open(script_path, "w") as script_file:
-                script_file.write("import pandas as pd\n\n")
+            with open(script_path, 'w') as script_file:
+                script_file.write("import pandas as pd\n")
+                script_file.write("from config import INPUT_CSV_PATH, OUTPUT_CSV_PATH\n\n")
                 script_file.write("def apply_transformations(df):\n")
-
-                # Keep track of all columns created by transformations
-                transformed_columns = []
-
+                
                 for source, transform in self.mappings.items():
                     if isinstance(transform, Transformation):
-                        script_file.write(
-                            f"    # Applying transformation: {transform.name}\n"
-                        )
+                        script_file.write(f"    # Applying transformation: {transform.name}\n")
                         for operation in transform.operations:
-                            script_file.write(f"    {operation}\n")
-                        # Add any new columns created by this transformation
-                        transformed_columns.extend(transform.new_columns)
-
-                    # ... (handle other types of transformations)
+                            # Ensure proper indentation for each line of the operation
+                            indented_operation = "\n".join("    " + line for line in operation.split("\n"))
+                            script_file.write(f"{indented_operation}\n")
+                        script_file.write("\n")
 
                 # Get the targeted columns
                 targeted_columns = []
@@ -570,47 +627,27 @@ class MappingUI(QMainWindow):
                     if text.startswith("Transformation: "):
                         transform_name = text.split(": ")[1]
                         if transform_name in self.transformations:
-                            # Include all columns created by this transformation
-                            for operation in self.transformations[
-                                transform_name
-                            ].operations:
-                                if "df['" in operation:
-                                    new_col = operation.split("df['")[1].split("']")[0]
-                                    targeted_columns.append(f"['{new_col}']")
+                            for op in self.transformations[transform_name].operations:
+                                if isinstance(op, str) and "df['" in op:
+                                    new_col = op.split("df['")[1].split("']")[0]
+                                    targeted_columns.append(f"'{new_col}'")
                     else:
-                        targeted_columns.append(f"['{text}']")
+                        targeted_columns.append(f"'{text}'")
 
-                # Add any remaining transformed columns
-                for col in transformed_columns:
-                    if f"['{col}']" not in targeted_columns:
-                        targeted_columns.append(f"['{col}']")
-
-                script_file.write(f"\n    # Select only the targeted columns\n")
-                script_file.write(
-                    f"    targeted_columns = {' + '.join(targeted_columns)}\n"
-                )
-                script_file.write(f"    df = df[targeted_columns]\n")
-
+                script_file.write("    # Select only the targeted columns\n")
+                script_file.write(f"    targeted_columns = [{', '.join(targeted_columns)}]\n")
+                script_file.write("    df = df[targeted_columns]\n")
                 script_file.write("    return df\n\n")
                 script_file.write("if __name__ == '__main__':\n")
-                script_file.write(
-                    "    input_csv_path = 'path/to/your/input.csv'  # Replace with your input CSV path\n"
-                )
-                script_file.write(
-                    "    output_csv_path = 'path/to/your/output.csv'  # Replace with your output CSV path\n"
-                )
-                script_file.write("    df = pd.read_csv(input_csv_path)\n")
+                script_file.write("    df = pd.read_csv(INPUT_CSV_PATH)\n")
                 script_file.write("    transformed_df = apply_transformations(df)\n")
-                script_file.write(
-                    "    transformed_df.to_csv(output_csv_path, index=False)\n"
-                )
-                script_file.write(
-                    "    print(f'Transformed CSV saved to {output_csv_path}')\n"
-                )
+                script_file.write("    transformed_df.to_csv(OUTPUT_CSV_PATH, index=False)\n")
+                script_file.write("    print(f'Transformed CSV saved to {OUTPUT_CSV_PATH}')\n")
 
             QMessageBox.information(
                 self, "Success", f"Python script exported successfully to {script_path}"
             )
+            QMessageBox.information(self, "Next Steps", "Please ensure you have a 'config.py' file in the same directory as the exported script with INPUT_CSV_PATH and OUTPUT_CSV_PATH defined.")
         except Exception as e:
             QMessageBox.critical(
                 self, "Error", f"Failed to export Python script: {str(e)}"
