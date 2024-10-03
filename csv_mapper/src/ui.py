@@ -56,6 +56,105 @@ class FreeformTextDialog(QDialog):
         return self.text_edit.toPlainText()
 
 
+class FilterDialog(QDialog):
+    def __init__(self, parent=None, columns=None):
+        super().__init__(parent)
+        self.setWindowTitle("Filter Editor")
+        self.columns = columns or []
+        self.conditions = []
+        
+        layout = QVBoxLayout(self)
+        
+        self.conditions_list = QListWidget()
+        layout.addWidget(self.conditions_list)
+        
+        button_layout = QHBoxLayout()
+        add_button = QPushButton("Add Condition")
+        add_button.clicked.connect(self.add_condition)
+        edit_button = QPushButton("Edit Condition")
+        edit_button.clicked.connect(self.edit_condition)
+        delete_button = QPushButton("Delete Condition")
+        delete_button.clicked.connect(self.delete_condition)
+        button_layout.addWidget(add_button)
+        button_layout.addWidget(edit_button)
+        button_layout.addWidget(delete_button)
+        layout.addLayout(button_layout)
+        
+        # Add column selection buttons
+        column_layout = QHBoxLayout()
+        for column in self.columns:
+            btn = QPushButton(column)
+            btn.clicked.connect(lambda _, col=column: self.insert_column(col))
+            column_layout.addWidget(btn)
+        layout.addLayout(column_layout)
+        
+        # Add filter operation buttons
+        filter_ops_layout = QHBoxLayout()
+        filter_ops = ["==", "!=", ">", "<", ">=", "<=", "in", "not in", "contains", "startswith", "endswith"]
+        for op in filter_ops:
+            btn = QPushButton(op)
+            btn.clicked.connect(lambda _, o=op: self.insert_filter_op(o))
+            filter_ops_layout.addWidget(btn)
+        layout.addLayout(filter_ops_layout)
+        
+        self.condition_edit = QLineEdit()
+        layout.addWidget(self.condition_edit)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def add_condition(self):
+        condition = self.condition_edit.text()
+        if condition:
+            self.conditions.append(condition)
+            self.update_conditions_list()
+            self.condition_edit.clear()
+
+    def edit_condition(self):
+        current_item = self.conditions_list.currentItem()
+        if current_item:
+            index = self.conditions_list.currentRow()
+            old_condition = self.conditions[index]
+            self.condition_edit.setText(old_condition)
+            if self.exec_():
+                new_condition = self.condition_edit.text()
+                self.conditions[index] = new_condition
+                self.update_conditions_list()
+
+    def delete_condition(self):
+        current_item = self.conditions_list.currentItem()
+        if current_item:
+            index = self.conditions_list.currentRow()
+            self.conditions.pop(index)
+            self.update_conditions_list()
+
+    def update_conditions_list(self):
+        self.conditions_list.clear()
+        for condition in self.conditions:
+            self.conditions_list.addItem(condition)
+
+    def insert_column(self, column):
+        current_text = self.condition_edit.text()
+        cursor_position = self.condition_edit.cursorPosition()
+        new_text = current_text[:cursor_position] + f"df['{column}']" + current_text[cursor_position:]
+        self.condition_edit.setText(new_text)
+        self.condition_edit.setCursorPosition(cursor_position + len(f"df['{column}']"))
+
+    def insert_filter_op(self, op):
+        current_text = self.condition_edit.text()
+        cursor_position = self.condition_edit.cursorPosition()
+        new_text = current_text[:cursor_position] + op + current_text[cursor_position:]
+        self.condition_edit.setText(new_text)
+        self.condition_edit.setCursorPosition(cursor_position + len(op))
+
+    def get_filter_code(self):
+        if not self.conditions:
+            return ""
+        return " & ".join(f"({cond})" for cond in self.conditions)
+
+
 class Transformation:
     def __init__(self, name):
         self.name = name
@@ -473,11 +572,10 @@ class MappingUI(QMainWindow):
         self.update_target_list()
 
     def add_operation(self, transformation, operation_list):
-        operation_types = ["Custom", "Rename", "Combine", "Split", "Filter", "Freeform Text"]
+        operation_types = ["Rename", "Combine", "Split", "Filter", "Freeform Text"]
         operation_type, ok = QInputDialog.getItem(
             self, "Add Operation", "Select operation type:", operation_types, 0, False
         )
-
         if ok:
             if operation_type == "Freeform Text":
                 dialog = FreeformTextDialog(self, columns=list(self.csv_data.columns))
@@ -489,29 +587,14 @@ class MappingUI(QMainWindow):
                     if ok:
                         # Extract placeholders and their corresponding column names
                         placeholders = re.findall(r'\{([^}]+)\}', template)
-                        
-                        # Create the operation code
                         operation_code = f"template = '''{template}'''\n"
                         operation_code += f"df['{new_column_name}'] = df.apply(lambda row: template.format("
-                        
-                        # Generate the format arguments
-                        format_args = []
-                        for placeholder in placeholders:
-                            # Use dictionary-style string formatting for column names with spaces
-                            format_args.append(f"**{{'{placeholder}': row['{placeholder}']}}")
-                        
+                        format_args = [f"**{{'{p}': row['{p}']}}" for p in placeholders]
                         operation_code += ", ".join(format_args)
                         operation_code += "), axis=1)\n"
                         
                         transformation.add_operation(operation_code)
                         operation_list.addItem(f"Freeform Text: {new_column_name}")
-            elif operation_type == "Custom":
-                custom_code, ok = QInputDialog.getMultiLineText(
-                    self, "Custom", "Enter custom transformation code:"
-                )
-                if ok:
-                    transformation.add_operation(custom_code)
-                    operation_list.addItem(f"Custom: {custom_code.split('\n')[0]}...")
             elif operation_type == "Rename":
                 old_name = self.get_column_selection("Select column to rename")
                 new_name, ok = QInputDialog.getText(
@@ -545,16 +628,13 @@ class MappingUI(QMainWindow):
                     transformation.add_operation(operation_code)
                     operation_list.addItem(f"Split: {col} (delimiter: {delimiter})")
             elif operation_type == "Filter":
-                col = self.get_column_selection("Select column to filter")
-                condition, ok = QInputDialog.getText(
-                    self, "Filter", f"Enter filter condition for {col} (e.g., > 5):"
-                )
-                if ok:
-                    operation_code = (
-                        f"df = df[df['{col}'].astype(str).eval('{condition}')]"
-                    )
-                    transformation.add_operation(operation_code)
-                    operation_list.addItem(f"Filter: {col} {condition}")
+                dialog = FilterDialog(self, columns=list(self.csv_data.columns))
+                if dialog.exec_():
+                    filter_code = dialog.get_filter_code()
+                    if filter_code:
+                        operation_code = f"df = df[{filter_code}]"
+                        transformation.add_operation(operation_code)
+                        operation_list.addItem(f"Filter: {filter_code}")
 
     def get_column_selection(self, prompt):
         columns = list(self.csv_data.columns)
@@ -633,6 +713,9 @@ class MappingUI(QMainWindow):
                                     targeted_columns.append(f"'{new_col}'")
                     else:
                         targeted_columns.append(f"'{text}'")
+
+                # Remove duplicates while preserving order
+                targeted_columns = list(dict.fromkeys(targeted_columns))
 
                 script_file.write("    # Select only the targeted columns\n")
                 script_file.write(f"    targeted_columns = [{', '.join(targeted_columns)}]\n")
